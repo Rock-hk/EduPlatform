@@ -2,9 +2,17 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from .models import Category, Project, Task
-from .serializers import CategoryTreeSerializer, CategoryDetailSerializer, ProjectSerializer, TaskSerializer
+from .models import Category, Project, Task, TimeEntry
+from .serializers import CategoryTreeSerializer, CategoryDetailSerializer, ProjectSerializer, TaskSerializer, TimeEntrySerializer
 from .permissions import ProjectPermission
+from django.db.models.functions import TruncWeek
+from django.db.models import Sum, Count, Q, F
+from django.contrib.auth import get_user_model
+from rest_framework_csv.renderers import CSVRenderer
+from django.db.models.functions import TruncDate
+from django.db.models import Window
+from django.db.models.functions import Lag
+User = get_user_model()
 
 
 
@@ -117,12 +125,153 @@ class ProjectViewSet(viewsets.ModelViewSet):
 class TaskViewSet(viewsets.ModelViewSet):
     queryset = Task.objects.all()
     serializer_class = TaskSerializer
+    
 
-    @action(detail=False, methods=['get'], url_path='blocked')
-    def blocked_tasks(self, request):
-        project_id = request.query_params.get('project')
-        if not project_id:
-            return Response({"detail": "project query param required"}, status=status.HTTP_400_BAD_REQUEST)
-        tasks = Task.objects.filter(project_id=project_id).filter(dependencies__status__in=['todo', 'in_progress']).distinct()
-        serializer = self.get_serializer(tasks, many=True)
-        return Response(serializer.data)
+    # /tasks/{id}/start-timer
+    @action(detail=True, methods=['post'], url_path='start-timer')
+    def start_timer(self, request, pk=None):
+        task = self.get_object()
+        start_time = request.data.get("start_time")
+        if not start_time:
+            start_time = timezone.now()
+        entry = TimeEntry.objects.create(
+            task=task, user=request.user, start_time=start_time
+        )
+        return Response(TimeEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
+
+    # /tasks/{id}/stop-timer
+    @action(detail=True, methods=['post'], url_path='stop-timer')
+    def stop_timer(self, request, pk=None):
+        task = self.get_object()
+        end_time = request.data.get("end_time") or timezone.now()
+
+        entry = (TimeEntry.objects
+                 .filter(task=task, user=request.user, end_time__isnull=True)
+                 .order_by('-start_time')
+                 .first())
+        if not entry:
+            return Response({"detail": "No active timer found"}, status=status.HTTP_400_BAD_REQUEST)
+
+        entry.end_time = end_time
+        entry.save()
+        return Response(TimeEntrySerializer(entry).data, status=status.HTTP_200_OK)
+    
+
+class TimeEntryViewSet(viewsets.ModelViewSet):
+    queryset = TimeEntry.objects.all()
+    serializer_class = TimeEntrySerializer
+
+    def get_queryset(self):
+        return TimeEntry.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+
+class ReportViewSet(viewsets.ViewSet):
+
+    @action(detail=False, methods=['get'])
+    def project_summary(self, request):
+        projects = Project.objects.all()
+        data = []
+        for project in projects:
+            data.append({
+                "project": project.title,
+                "total_time": project.total_time_spent(),
+                "tasks": project.team_productivity()
+            })
+        return Response(data)
+
+    @action(detail=False, methods=['get'])
+    def user_time(self, request):
+        qs = TimeEntry.objects.values("user__username").annotate(
+            total_time=Sum("duration")
+        )
+        return Response(list(qs))
+
+    @action(detail=False, methods=['get'])
+    def weekly_time(self, request):
+        qs = (TimeEntry.objects.annotate(week=TruncWeek("start_time"))
+              .values("user__username", "week")
+              .annotate(total_time=Sum("duration"))
+              .order_by("week"))
+        return Response(list(qs))
+
+    @action(detail=False, methods=['get'])
+    def task_progress(self, request):
+        qs = (Task.objects.annotate(
+                total_time=Sum("time_entries__duration"),
+                done=Count("id", filter=Q(status=Task.Status.DONE)),
+                in_progress=Count("id", filter=Q(status=Task.Status.IN_PROGRESS)),
+            )
+            .values("id", "title", "status", "total_time", "done", "in_progress"))
+        return Response(list(qs))
+
+
+class DashboardViewSet(viewsets.ViewSet):
+
+    @action(detail=True, methods=['get'])
+    def burndown(self, request, pk=None):
+        """
+        Burndown chart: Remaining tasks over time
+        """
+        project = Project.objects.get(pk=pk)
+        data = (
+            Task.objects.filter(project=project)
+            .annotate(day=TruncDate('created_at'))
+            .values('day')
+            .annotate(total=Count('id'))
+            .order_by('day')
+        )
+        return Response(data)
+
+    @action(detail=True, methods=['get'])
+    def team_load(self, request, pk=None):
+        """
+        Team workload: How many tasks each member has
+        """
+        project = Project.objects.get(pk=pk)
+        data = (
+            User.objects.filter(taskassignment__task__project=project)
+            .annotate(task_count=Count('taskassignment'))
+            .annotate(total_time=Sum('taskassignment__task__timeentry__duration'))
+            .values('id', 'email', 'task_count', 'total_time')
+        )
+        return Response(data)
+    
+
+    @action(detail=False, methods=['get'])
+    def export(self, request):
+        """
+        Export analytics data in CSV/Excel format
+        """
+        format = request.query_params.get('format', 'json')
+        data = Project.objects.annotate(total_tasks=Count('task')).values('id', 'title', 'total_tasks')
+
+        if format == 'csv':
+            
+            renderer = CSVRenderer()
+            return Response(data, content_type='text/csv')
+        
+        return Response(data)
+    
+    @action(detail=False, methods=['get'])
+    def productivity_trends(self, request):
+        """
+        User productivity trends over time using LAG
+        """
+        qs = (
+            TimeEntry.objects
+            .annotate(day=TruncDate('start_time'))
+            .annotate(
+                prev=Window(
+                    expression=Lag('start_time'),
+                    partition_by=[F('user_id')],
+                    order_by=F('start_time').asc()
+                )
+            )
+            .annotate(diff=F('start_time') - F('prev'))
+            .values('user_id', 'day', 'start_time', 'prev', 'diff')
+            .order_by('user_id', 'day')
+        )
+        return Response(list(qs))

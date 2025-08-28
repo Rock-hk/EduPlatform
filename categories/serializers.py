@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Category, Project, Task, TaskAssignment
+from .models import Category, Project, Task, TaskAssignment, TimeEntry
 from teams.models import Team
 
 class RecursiveField(serializers.Serializer):
@@ -64,10 +64,12 @@ class TaskSerializer(serializers.ModelSerializer):
         queryset=Task.objects.all(), many=True, source='dependencies', write_only=True, required=False
     )
     is_blocked = serializers.SerializerMethodField()
+    total_time = serializers.SerializerMethodField()
+    progress = serializers.SerializerMethodField()  
 
     class Meta:
         model = Task
-        fields = ['id', 'title', 'description', 'status', 'assigned_to', 'dependencies_ids', 'is_blocked', 'project', 'created_at', 'updated_at']
+        fields = ['id', 'title', 'description', 'status', 'assigned_to', 'dependencies_ids', 'is_blocked', 'project', 'created_at', 'updated_at', 'total_time', 'progress']
 
     def get_is_blocked(self, obj):
         return obj.is_blocked()
@@ -78,3 +80,19 @@ class TaskSerializer(serializers.ModelSerializer):
             if task.has_circular_dependency(dep):
                 raise serializers.ValidationError(f"Circular dependency detected with task {dep.id}")
         return value
+    
+    def get_total_time(self, obj):
+        return obj.total_time_spent()
+
+    def get_progress(self, obj):
+        return obj.progress_percentage()
+
+
+class TimeEntrySerializer(serializers.ModelSerializer):
+    duration = serializers.DurationField(read_only=True)
+
+    class Meta:
+        model = TimeEntry
+        fields = ['id', 'task', 'user', 'description', 'start_time', 'end_time', 'duration']
+
+    

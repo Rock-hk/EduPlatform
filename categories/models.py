@@ -1,6 +1,8 @@
 from django.db import models
 from mptt.models import MPTTModel, TreeForeignKey
 from django.conf import settings
+from django.db.models import Sum, Count, DurationField, ExpressionWrapper, F
+
 User = settings.AUTH_USER_MODEL
 
 
@@ -44,6 +46,18 @@ class Project(models.Model):
         type_label = "Template" if self.is_template else "Project"
         return f"{self.title} ({type_label})"
 
+    def total_time_spent(self):
+        return self.tasks.aggregate(
+            total=Sum('time_entries__duration')
+        )['total'] or 0
+
+    def team_productivity(self):
+        return self.tasks.aggregate(
+            tasks=Count('id'),
+            done=Count('id', filter=models.Q(status=Task.Status.DONE)),
+            in_progress=Count('id', filter=models.Q(status=Task.Status.IN_PROGRESS)),
+        )
+
 
 class Task(models.Model):
     class Status(models.TextChoices):
@@ -61,6 +75,10 @@ class Task(models.Model):
     dependencies = models.ManyToManyField('self', symmetrical=False, related_name='dependents', blank=True)
     assigned_to = models.ManyToManyField(User, through='TaskAssignment', related_name='tasks')
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.TODO)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 
     def __str__(self):
         return self.title
@@ -81,7 +99,18 @@ class Task(models.Model):
                     return True
             return False
         return dfs(target_task)
+    
+    def total_time_spent(self):
+        return self.time_entries.aggregate(
+            total=Sum('duration')
+        )['total'] or 0
 
+    def progress_percentage(self):
+        if self.status == Task.Status.DONE:
+            return 100
+        elif self.status == Task.Status.IN_PROGRESS:
+            return 50
+        return 0
 
 class TaskAssignment(models.Model):
     task = models.ForeignKey(Task, on_delete=models.CASCADE)
@@ -91,3 +120,23 @@ class TaskAssignment(models.Model):
     class Meta:
         unique_together = ('task', 'user')
     
+
+class TimeEntry(models.Model):
+    task = models.ForeignKey("Task", related_name="time_entries", on_delete=models.CASCADE)
+    user = models.ForeignKey(User, related_name="time_entries", on_delete=models.CASCADE)
+    description = models.TextField(blank=True)
+    
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField(null=True, blank=True)
+
+    duration = models.DurationField(null=True, blank=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if self.start_time and self.end_time:
+            self.duration = self.end_time - self.start_time
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.user} - {self.task} ({self.duration})"
