@@ -8,4 +8,4 @@ class ProjectPermission(permissions.BasePermission):
             return True
         if obj.team:
             return obj.team.memberships.filter(user=request.user, status='active').exists()
-        return False
+        return False 
