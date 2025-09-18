@@ -127,7 +127,6 @@ class TaskViewSet(viewsets.ModelViewSet):
     serializer_class = TaskSerializer
     
 
-    # /tasks/{id}/start-timer
     @action(detail=True, methods=['post'], url_path='start-timer')
     def start_timer(self, request, pk=None):
         task = self.get_object()
@@ -139,7 +138,6 @@ class TaskViewSet(viewsets.ModelViewSet):
         )
         return Response(TimeEntrySerializer(entry).data, status=status.HTTP_201_CREATED)
 
-    # /tasks/{id}/stop-timer
     @action(detail=True, methods=['post'], url_path='stop-timer')
     def stop_timer(self, request, pk=None):
         task = self.get_object()
@@ -212,9 +210,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'])
     def burndown(self, request, pk=None):
-        """
-        Burndown chart: Remaining tasks over time
-        """
+        
         project = Project.objects.get(pk=pk)
         data = (
             Task.objects.filter(project=project)
@@ -227,9 +223,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'])
     def team_load(self, request, pk=None):
-        """
-        Team workload: How many tasks each member has
-        """
+       
         project = Project.objects.get(pk=pk)
         data = (
             User.objects.filter(taskassignment__task__project=project)
@@ -242,9 +236,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def export(self, request):
-        """
-        Export analytics data in CSV/Excel format
-        """
+       
         format = request.query_params.get('format', 'json')
         data = Project.objects.annotate(total_tasks=Count('task')).values('id', 'title', 'total_tasks')
 
@@ -257,9 +249,7 @@ class DashboardViewSet(viewsets.ViewSet):
     
     @action(detail=False, methods=['get'])
     def productivity_trends(self, request):
-        """
-        User productivity trends over time using LAG
-        """
+        
         qs = (
             TimeEntry.objects
             .annotate(day=TruncDate('start_time'))
