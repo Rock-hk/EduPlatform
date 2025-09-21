@@ -38,11 +38,14 @@ class TeamMembershipManager(models.Manager):
 
 
 class TeamMembership(models.Model):
+    from accounts.models import User 
+
     class Role(models.TextChoices):
-        OWNER = 'owner', 'Owner'
-        ADMIN = 'admin', 'Admin'
-        MEMBER = 'member', 'Member'
-        INVITED = 'invited', 'Invited'
+        OWNER = User.Roles.SYSTEM_ADMIN   
+        ADMIN = User.Roles.MANAGER
+        MEMBER = User.Roles.USER
+        DEVELOPER = User.Roles.DEVELOPER
+        INVITED = 'invited', 'Invited'  
 
     class Status(models.TextChoices):
         ACTIVE = 'active', 'Active'

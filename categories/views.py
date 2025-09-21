@@ -2,18 +2,22 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
-from .models import Category, Project, Task, TimeEntry
-from .serializers import CategoryTreeSerializer, CategoryDetailSerializer, ProjectSerializer, TaskSerializer, TimeEntrySerializer
+from .models import Category, Project, Task, TimeEntry, TaskAssignment
+from .serializers import (
+    CategoryTreeSerializer, CategoryDetailSerializer,
+    ProjectSerializer, TaskSerializer, TimeEntrySerializer, TaskAssignmentSerializer
+)
 from .permissions import ProjectPermission
-from django.db.models.functions import TruncWeek
-from django.db.models import Sum, Count, Q, F
+from django.db.models.functions import TruncWeek, TruncDate
+from django.db.models import Sum, Count, Q, F, Window
+from django.db.models.functions import Lag
 from django.contrib.auth import get_user_model
 from rest_framework_csv.renderers import CSVRenderer
-from django.db.models.functions import TruncDate
-from django.db.models import Window
-from django.db.models.functions import Lag
-User = get_user_model()
+from teams.models import TeamMembership
+from django.db import transaction
+from django.utils import timezone
 
+User = get_user_model()
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
@@ -27,21 +31,19 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='tree')
     def tree(self, request):
-       
         roots = Category.objects.filter(parent__isnull=True)
         serializer = self.get_serializer(roots, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='move')
     def move(self, request, pk=None):
-        
         category = self.get_object()
         parent_id = request.data.get('parent_id', None)
         if parent_id is None:
             category.parent = None
             category.save()
             return Response(self.get_serializer(category).data)
-        if parent_id == category.id:
+        if int(parent_id) == category.id:
             return Response({"detail": "Cannot set self as parent."}, status=status.HTTP_400_BAD_REQUEST)
         parent = get_object_or_404(Category, id=parent_id)
         if parent.is_descendant_of(category):
@@ -52,7 +54,6 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='descendants')
     def descendants(self, request, pk=None):
-        
         category = self.get_object()
         include_self = request.query_params.get('include_self', 'true').lower() != 'false'
         if include_self:
@@ -64,11 +65,9 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='projects')
     def projects(self, request, pk=None):
-      
         category = self.get_object()
         descendant_ids = category.get_descendants(include_self=True).values_list('id', flat=True)
         projects = Project.objects.filter(category_id__in=list(descendant_ids)).select_related('owner', 'category')
-        from rest_framework import serializers
         class SimpleProjectSerializer(serializers.ModelSerializer):
             category_name = serializers.CharField(source='category.name', read_only=True)
             owner_email = serializers.CharField(source='owner.email', read_only=True)
@@ -80,7 +79,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
 
 
 class ProjectViewSet(viewsets.ModelViewSet):
-    queryset = Project.objects.all()
+    queryset = Project.objects.select_related('category', 'team', 'owner').all()
     serializer_class = ProjectSerializer
     permission_classes = [ProjectPermission]
 
@@ -105,7 +104,7 @@ class ProjectViewSet(viewsets.ModelViewSet):
             )
             tasks = project.tasks.all()
             new_tasks = [
-                Task(project=cloned_project, title=t.title, description=t.description)
+                Task(project=cloned_project, title=t.title, description=t.description, order=t.order)
                 for t in tasks
             ]
             Task.objects.bulk_create(new_tasks)
@@ -123,9 +122,8 @@ class ProjectViewSet(viewsets.ModelViewSet):
 
 
 class TaskViewSet(viewsets.ModelViewSet):
-    queryset = Task.objects.all()
+    queryset = Task.objects.select_related('project').prefetch_related('dependencies', 'assignments__user').all()
     serializer_class = TaskSerializer
-    
 
     @action(detail=True, methods=['post'], url_path='start-timer')
     def start_timer(self, request, pk=None):
@@ -153,7 +151,7 @@ class TaskViewSet(viewsets.ModelViewSet):
         entry.end_time = end_time
         entry.save()
         return Response(TimeEntrySerializer(entry).data, status=status.HTTP_200_OK)
-    
+
 
 class TimeEntryViewSet(viewsets.ModelViewSet):
     queryset = TimeEntry.objects.all()
@@ -182,7 +180,7 @@ class ReportViewSet(viewsets.ViewSet):
 
     @action(detail=False, methods=['get'])
     def user_time(self, request):
-        qs = TimeEntry.objects.values("user__username").annotate(
+        qs = TimeEntry.objects.values("user__email").annotate(
             total_time=Sum("duration")
         )
         return Response(list(qs))
@@ -190,7 +188,7 @@ class ReportViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def weekly_time(self, request):
         qs = (TimeEntry.objects.annotate(week=TruncWeek("start_time"))
-              .values("user__username", "week")
+              .values("user__email", "week")
               .annotate(total_time=Sum("duration"))
               .order_by("week"))
         return Response(list(qs))
@@ -210,8 +208,7 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'])
     def burndown(self, request, pk=None):
-        
-        project = Project.objects.get(pk=pk)
+        project = get_object_or_404(Project, pk=pk)
         data = (
             Task.objects.filter(project=project)
             .annotate(day=TruncDate('created_at'))
@@ -223,33 +220,28 @@ class DashboardViewSet(viewsets.ViewSet):
 
     @action(detail=True, methods=['get'])
     def team_load(self, request, pk=None):
-       
-        project = Project.objects.get(pk=pk)
+        project = get_object_or_404(Project, pk=pk)
         data = (
             User.objects.filter(taskassignment__task__project=project)
             .annotate(task_count=Count('taskassignment'))
-            .annotate(total_time=Sum('taskassignment__task__timeentry__duration'))
+            .annotate(total_time=Sum('taskassignment__task__time_entries__duration'))
             .values('id', 'email', 'task_count', 'total_time')
         )
         return Response(data)
-    
 
     @action(detail=False, methods=['get'])
     def export(self, request):
-       
-        format = request.query_params.get('format', 'json')
-        data = Project.objects.annotate(total_tasks=Count('task')).values('id', 'title', 'total_tasks')
+        fmt = request.query_params.get('format', 'json')
+        data = Project.objects.annotate(total_tasks=Count('tasks')).values('id', 'title', 'total_tasks')
 
-        if format == 'csv':
-            
+        if fmt == 'csv':
             renderer = CSVRenderer()
             return Response(data, content_type='text/csv')
-        
+
         return Response(data)
-    
+
     @action(detail=False, methods=['get'])
     def productivity_trends(self, request):
-        
         qs = (
             TimeEntry.objects
             .annotate(day=TruncDate('start_time'))

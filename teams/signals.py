@@ -1,6 +1,7 @@
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from .models import Team, TeamMembership
+from accounts.models import User
 
 @receiver(post_save, sender=Team)
 def create_owner_membership(sender, instance, created, **kwargs):
@@ -8,7 +9,7 @@ def create_owner_membership(sender, instance, created, **kwargs):
         TeamMembership.objects.create(
             team=instance,
             user=instance.created_by,
-            role=TeamMembership.Role.OWNER,
+            role=User.Roles.SYSTEM_ADMIN,
             status=TeamMembership.Status.ACTIVE,
             invited_by=instance.created_by
         )
