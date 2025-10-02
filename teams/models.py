@@ -1,8 +1,8 @@
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+from accounts.models import User 
 
-User = settings.AUTH_USER_MODEL
 
 class Team(models.Model):
     name = models.CharField(max_length=150)
@@ -38,7 +38,7 @@ class TeamMembershipManager(models.Manager):
 
 
 class TeamMembership(models.Model):
-    from accounts.models import User 
+    
 
     class Role(models.TextChoices):
         OWNER = User.Roles.SYSTEM_ADMIN   

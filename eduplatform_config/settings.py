@@ -41,7 +41,17 @@ INSTALLED_APPS = [
     'teams',
     'mptt',
     'categories',
+    'activity',
+    'channels'
 ]
+
+ASGI_APPLICATION = "eduplatform_config.asgi.application"
+
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels.layers.InMemoryChannelLayer"
+    }
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
